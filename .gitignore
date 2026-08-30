@@ -1,0 +1,6 @@
+.pio/
+.venv/
+managed_components/
+.claude/settings.local.json
+*.pyc
+__pycache__/

@@ -1,0 +1,3 @@
+# sdkconfig.defaults — used by all envs; only lab1_3 references these options
+CONFIG_BLINK_LED_GPIO=y
+CONFIG_BLINK_PERIOD=1000
