@@ -1,5 +1,22 @@
+// lab5_3 — optical Morse receiver, now self-contained (no Pi or PC screen
+// needed): an onboard LED transmitter (GPIO4 by default) blinks TX_MESSAGE
+// in Morse timing, and the same photoresistor receiver (ADC1 ch3 / GPIO3)
+// decodes it.
+//
+// Wiring:
+//   Photoresistor divider: 3.3V -> photoresistor -> [node -> GPIO3] ->
+//     resistor -> GND (more light must raise the ADC reading at the node).
+//   LED: GPIO4 -> LED anode (long leg); LED cathode (short leg) -> resistor
+//     -> GND. Point the LED at the photoresistor and shield both from
+//     ambient light.
+//
+// Set via build_flags in platformio.ini (both optional):
+//   -DTX_MESSAGE=\"SOS\"
+//   -DLED_GPIO_NUM=4
+
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
@@ -7,10 +24,18 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "driver/gpio.h"
 
 #include "esp_adc/adc_oneshot.h"
 
 static const char *TAG = "MORSE_RX";
+
+#ifndef TX_MESSAGE
+#define TX_MESSAGE "SOS"
+#endif
+#ifndef LED_GPIO_NUM
+#define LED_GPIO_NUM 4
+#endif
 
 /* -------------------------------------------------------------------------- */
 /*                        Hardware / ADC configuration                        */
@@ -25,9 +50,8 @@ static const char *TAG = "MORSE_RX";
 /*                             Timing configuration                            */
 /* -------------------------------------------------------------------------- */
 
-// Keep timing as-is
 #define MORSE_UNIT_MS        18    // length of a "dot"
-#define SAMPLE_PERIOD_MS     9    // sampling period
+#define SAMPLE_PERIOD_MS     2     // sampling period
 #define CALIBRATION_SAMPLES  200
 
 // Classification thresholds (in units of MORSE_UNIT_MS)
@@ -41,7 +65,7 @@ static const char *TAG = "MORSE_RX";
 #define MESSAGE_GAP_UNITS    9    // >= 20 units -> end of phrase (newline)
 
 // ADC thresholding
-#define THRESHOLD_MARGIN     50    // counts above dark baseline
+#define THRESHOLD_MARGIN     20    // counts above dark baseline
 
 // Ignore very short pulses/gaps (units < MIN_VALID_UNITS)
 #define MIN_VALID_UNITS      1
@@ -87,6 +111,107 @@ static char morse_lookup(const char *pattern)
     return 0;
 }
 
+static const char *morse_encode(char c)
+{
+    c = (char) toupper((unsigned char) c);
+    for (int i = 0; MORSE_TABLE[i].pattern != NULL; i++) {
+        if (MORSE_TABLE[i].ch == c) {
+            return MORSE_TABLE[i].pattern;
+        }
+    }
+    return NULL;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         Transmitter (drives the LED)                       */
+/* -------------------------------------------------------------------------- */
+
+#define TX_REPEAT_GAP_UNITS  7
+#define TX_WORD_GAP_UNITS    7
+#define TX_LETTER_GAP_UNITS  3
+#define TX_SYMBOL_GAP_UNITS  1
+
+static const gpio_num_t kLedGpio = (gpio_num_t) LED_GPIO_NUM;
+
+static void led_init(void)
+{
+    gpio_config_t io_conf = {0};
+    io_conf.pin_bit_mask = (1ULL << kLedGpio);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    gpio_set_level(kLedGpio, 0);
+}
+
+static void tx_blink_symbol(char sym)
+{
+    if (sym == '.') {
+        gpio_set_level(kLedGpio, 1);
+        vTaskDelay(pdMS_TO_TICKS(MORSE_UNIT_MS));
+        gpio_set_level(kLedGpio, 0);
+    } else if (sym == '-') {
+        gpio_set_level(kLedGpio, 1);
+        vTaskDelay(pdMS_TO_TICKS(3 * MORSE_UNIT_MS));
+        gpio_set_level(kLedGpio, 0);
+    }
+}
+
+// Blinks message once (words separated by spaces), using the standard Morse
+// timing ratios: 1u between symbols, 3u between letters, 7u between words.
+static void tx_send_message(const char *message)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s", message);
+
+    char *saveptr = NULL;
+    char *word = strtok_r(buf, " ", &saveptr);
+    bool first_word = true;
+
+    while (word) {
+        if (!first_word) {
+            vTaskDelay(pdMS_TO_TICKS(TX_WORD_GAP_UNITS * MORSE_UNIT_MS));
+        }
+        first_word = false;
+
+        for (int li = 0; word[li] != '\0'; li++) {
+            if (li > 0) {
+                vTaskDelay(pdMS_TO_TICKS(TX_LETTER_GAP_UNITS * MORSE_UNIT_MS));
+            }
+            const char *pattern = morse_encode(word[li]);
+            if (!pattern) {
+                continue;
+            }
+            for (int si = 0; pattern[si] != '\0'; si++) {
+                if (si > 0) {
+                    vTaskDelay(pdMS_TO_TICKS(TX_SYMBOL_GAP_UNITS * MORSE_UNIT_MS));
+                }
+                tx_blink_symbol(pattern[si]);
+            }
+        }
+
+        word = strtok_r(NULL, " ", &saveptr);
+    }
+}
+
+static void morse_tx_task(void *arg)
+{
+    (void) arg;
+    led_init();
+
+    ESP_LOGI(TAG, "Transmitting \"%s\" on GPIO%d, unit=%dms", TX_MESSAGE, (int) kLedGpio, MORSE_UNIT_MS);
+
+    // Give the receiver task time to finish its dark-baseline calibration
+    // before the LED starts blinking.
+    vTaskDelay(pdMS_TO_TICKS(CALIBRATION_SAMPLES * SAMPLE_PERIOD_MS + 500));
+
+    while (1) {
+        tx_send_message(TX_MESSAGE);
+        vTaskDelay(pdMS_TO_TICKS(TX_REPEAT_GAP_UNITS * MORSE_UNIT_MS));
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               ADC handling                                 */
 /* -------------------------------------------------------------------------- */
@@ -119,7 +244,7 @@ static void adc_calibrate_dark(void)
         if (adc_oneshot_read(adc_handle, MORSE_ADC_CHANNEL, &raw) == ESP_OK) {
             sum += raw;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
     }
 
     dark_baseline   = sum / CALIBRATION_SAMPLES;
@@ -218,10 +343,23 @@ static void flush_letter(char *symbol_buf, int *len)
  *   the current symbol buffer (helps recover from messed-up dashes).
  * - Caps pattern length (MAX_SYMBOLS_PER_CHAR) to keep letters sane.
  */
+// Set whenever the preceding OFF gap was a LETTER_GAP or longer (see
+// handle_off_time). The photoresistor has measurable rise-time lag: the
+// very first ON pulse after any such gap measures short enough to make a
+// lone dot vanish entirely (confirmed via direct TX/RX timestamp
+// correlation). Pulses following only a short SYMBOL_GAP don't show this —
+// the sensor is already "warmed up" from the previous pulse.
+static int g_pending_compensation_ms = 0;
+
 static void handle_on_time(int on_time_ms, char *symbol_buf, int *len)
 {
     if (on_time_ms <= 0) {
         return;
+    }
+
+    if (g_pending_compensation_ms > 0) {
+        on_time_ms += g_pending_compensation_ms;
+        g_pending_compensation_ms = 0;
     }
 
     int units = (on_time_ms + MORSE_UNIT_MS / 2) / MORSE_UNIT_MS; // round
@@ -397,5 +535,9 @@ static void morse_decoder_task(void *arg)
 
 void app_main(void)
 {
-    xTaskCreate(morse_decoder_task, "morse_decoder_task", 4096, NULL, 5, NULL);
+    // RX gets a higher priority than TX: both need tight sub-100ms timing on
+    // this single-core chip, and RX missing a sample is worse (corrupts a
+    // pulse-width measurement) than TX being delayed a tick or two.
+    xTaskCreate(morse_decoder_task, "morse_decoder_task", 4096, NULL, 6, NULL);
+    xTaskCreate(morse_tx_task, "morse_tx_task", 4096, NULL, 5, NULL);
 }
