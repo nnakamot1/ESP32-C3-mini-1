@@ -9,9 +9,9 @@ extern "C" {
 
 static const char *TAG = "RGBLCD1602";
 
-// I2C config (SCL=8, SDA=10)
-#define I2C_MASTER_SCL_IO           GPIO_NUM_8
-#define I2C_MASTER_SDA_IO           GPIO_NUM_10
+// I2C config (SDA=1, SCL=0)
+#define I2C_MASTER_SDA_IO           GPIO_NUM_1
+#define I2C_MASTER_SCL_IO           GPIO_NUM_0
 #define I2C_MASTER_FREQ_HZ          100000
 #define I2C_MASTER_TX_BUF_DISABLE   0
 #define I2C_MASTER_RX_BUF_DISABLE   0
@@ -222,6 +222,7 @@ void DFRobot_RGBLCD1602::setCursor(uint8_t col, uint8_t row)
 
     uint8_t data[2] = { 0x80, addr }; // control byte + address
     send(data, 2);
+    esp_rom_delay_us(1000); // let DDRAM address settle before the next byte
 }
 
 void DFRobot_RGBLCD1602::setRGB(uint8_t r, uint8_t g, uint8_t b)
@@ -257,6 +258,7 @@ size_t DFRobot_RGBLCD1602::write(uint8_t value)
 {
     uint8_t data[2] = { 0x40, value }; // data register
     send(data, 2);
+    esp_rom_delay_us(1000); // give the controller time to execute before the next byte
     return 1;
 }
 
@@ -264,6 +266,7 @@ void DFRobot_RGBLCD1602::command(uint8_t value)
 {
     uint8_t data[2] = { 0x80, value }; // command register
     send(data, 2);
+    esp_rom_delay_us(1000); // give the controller time to execute before the next byte
 }
 
 void DFRobot_RGBLCD1602::setBacklight(bool mode)

@@ -225,6 +225,7 @@ void DFRobot_RGBLCD1602::setCursor(uint8_t col, uint8_t row)
 
     uint8_t data[2] = { 0x80, addr }; // control byte + address
     send(data, 2);
+    esp_rom_delay_us(1000); // let DDRAM address settle before the next byte
 }
 
 void DFRobot_RGBLCD1602::setRGB(uint8_t r, uint8_t g, uint8_t b)
@@ -260,6 +261,7 @@ size_t DFRobot_RGBLCD1602::write(uint8_t value)
 {
     uint8_t data[2] = { 0x40, value }; // data register
     send(data, 2);
+    esp_rom_delay_us(1000); // give the controller time to execute before the next byte
     return 1;
 }
 
@@ -267,6 +269,7 @@ void DFRobot_RGBLCD1602::command(uint8_t value)
 {
     uint8_t data[2] = { 0x80, value }; // command register
     send(data, 2);
+    esp_rom_delay_us(1000); // give the controller time to execute before the next byte
 }
 
 void DFRobot_RGBLCD1602::setBacklight(bool mode)
